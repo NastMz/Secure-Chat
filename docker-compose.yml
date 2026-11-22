@@ -1,4 +1,4 @@
-# SecureChat: server on host port 8120, plus an interactive client recipe.
+# SecureChat: server on 127.0.0.1:8120 (host loopback only), plus an interactive client recipe.
 #
 #   docker compose up -d --build server
 #   docker compose run --rm client            # repeat in other terminals
@@ -11,7 +11,7 @@ services:
     image: securechat-app:1.0.0
     container_name: securechat-server
     ports:
-      - "8120:7000"
+      - "127.0.0.1:8120:7000"   # loopback only; see README to expose it
     volumes:
       - securechat-data:/data
     networks:

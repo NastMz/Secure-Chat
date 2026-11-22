@@ -1,52 +1,21 @@
-# Prerequisites
-*.d
-
-# Object files
+# Build output
+/build/
+/build-sanitize/
 *.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
+*.d
 *.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
 *.so
-*.so.*
-*.dylib
 
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
+# Runtime secrets and trust stores (never commit keys)
+*.key
+known_hosts
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# Screenshot tooling scratch output
+/scripts/screenshots/out/
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

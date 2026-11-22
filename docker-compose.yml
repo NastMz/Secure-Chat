@@ -1,0 +1,44 @@
+# SecureChat: server on host port 8120, plus an interactive client recipe.
+#
+#   docker compose up -d --build server
+#   docker compose run --rm client            # repeat in other terminals
+#   docker compose down                       # add -v to delete the server key
+name: securechat
+
+services:
+  server:
+    build: .
+    image: securechat-app:1.0.0
+    container_name: securechat-server
+    ports:
+      - "8120:7000"
+    volumes:
+      - securechat-data:/data
+    networks:
+      - securechat-net
+    restart: unless-stopped
+    stop_grace_period: 5s
+
+  client:
+    image: securechat-app:1.0.0
+    profiles: ["client"]
+    entrypoint: ["securechat-client"]
+    command: ["--host", "server", "--port", "7000"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - securechat-client-home:/home/chat/.securechat
+    networks:
+      - securechat-net
+    depends_on:
+      - server
+
+volumes:
+  securechat-data:
+    name: securechat-data
+  securechat-client-home:
+    name: securechat-client-home
+
+networks:
+  securechat-net:
+    name: securechat-net

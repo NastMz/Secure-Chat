@@ -1,0 +1,7 @@
+.git
+build
+build-sanitize
+docs
+scripts
+*.key
+known_hosts

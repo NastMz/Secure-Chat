@@ -84,16 +84,28 @@ int sc_channel_open(sc_channel *ch, const uint8_t *in, size_t len,
 
 void sc_box_keypair_generate(sc_box_keypair *kp);
 
-/* End-to-end seal: out = random nonce || crypto_box_easy(msg). */
+/*
+ * End-to-end seal from `self` to `peer_pk`:
+ *   out = random nonce || crypto_box_easy(self.pk || peer_pk || counter || msg)
+ * `counter` must be non-zero and strictly increase across every message the
+ * sender seals in its session (one counter for all peers is fine).
+ */
 int sc_e2e_seal(const sc_box_keypair *self,
                 const uint8_t peer_pk[crypto_box_PUBLICKEYBYTES],
-                const uint8_t *msg, size_t len, uint8_t *out, size_t cap,
-                size_t *out_len);
+                uint64_t counter, const uint8_t *msg, size_t len,
+                uint8_t *out, size_t cap, size_t *out_len);
 
+/*
+ * Open a message that `peer_pk` sealed for `self`. Fails unless the bound
+ * sender key is `peer_pk`, the bound recipient key is `self.pk` (this rejects
+ * a message reflected back to its author) and the counter is greater than
+ * `*last_counter` (this rejects replay and reordering). On success
+ * `*last_counter` is advanced; on failure nothing changes.
+ */
 int sc_e2e_open(const sc_box_keypair *self,
                 const uint8_t peer_pk[crypto_box_PUBLICKEYBYTES],
-                const uint8_t *in, size_t len, uint8_t *out, size_t cap,
-                size_t *out_len);
+                uint64_t *last_counter, const uint8_t *in, size_t len,
+                uint8_t *out, size_t cap, size_t *out_len);
 
 /* Human-comparable fingerprint: BLAKE2b-160 of the key in 10 hex groups. */
 void sc_fingerprint(const uint8_t *key, size_t key_len,

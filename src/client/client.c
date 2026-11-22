@@ -117,13 +117,42 @@ static void roster_remove(sc_client *c, const char *name) {
 
 /* ---- server messages ------------------------------------------------------- */
 
+/* Replay state for a peer key; NULL when the table is full (fail closed). */
+static sc_e2e_peer *e2e_rx_find(sc_client *c,
+                                const uint8_t key[crypto_box_PUBLICKEYBYTES]) {
+    for (size_t i = 0; i < c->e2e_rx_len; i++) {
+        if (sodium_memcmp(c->e2e_rx[i].key, key, crypto_box_PUBLICKEYBYTES) == 0) {
+            return &c->e2e_rx[i];
+        }
+    }
+    return NULL;
+}
+
+/* Open a private blob from `sender`, enforcing per-key replay protection. */
+static int open_private(sc_client *c, const sc_peer *sender, const sc_msg *msg,
+                        uint8_t *plain, size_t *plain_len) {
+    sc_e2e_peer *state = e2e_rx_find(c, sender->key);
+    uint64_t last = state != NULL ? state->last_counter : 0;
+    if (state == NULL && c->e2e_rx_len == SC_E2E_PEERS_MAX) {
+        return -1; /* replay table full: fail closed */
+    }
+    if (sc_e2e_open(&c->box, sender->key, &last, msg->blob, msg->blob_len,
+                    plain, SC_TEXT_MAX, plain_len) != 0) {
+        return -1;
+    }
+    if (state == NULL) {
+        state = &c->e2e_rx[c->e2e_rx_len++];
+        memcpy(state->key, sender->key, sizeof(state->key));
+    }
+    state->last_counter = last;
+    return 0;
+}
+
 static void show_private(sc_client *c, const sc_msg *msg) {
     sc_peer *sender = roster_find(c, msg->name);
     uint8_t plain[SC_TEXT_MAX + 1];
     size_t plain_len = 0;
-    if (sender == NULL ||
-        sc_e2e_open(&c->box, sender->key, msg->blob, msg->blob_len, plain,
-                    SC_TEXT_MAX, &plain_len) != 0) {
+    if (sender == NULL || open_private(c, sender, msg, plain, &plain_len) != 0) {
         sc_ui_error(&c->ui, "Rejected a private message claiming to be from %s: "
                             "it failed end-to-end authentication.",
                     msg->name);
@@ -276,11 +305,13 @@ static run_status send_private(sc_client *c, const sc_command *cmd) {
     sc_msg msg;
     sc_msg_init(&msg, SC_MSG_PRIVATE);
     memcpy(msg.name, peer->name, sizeof(msg.name));
-    if (sc_e2e_seal(&c->box, peer->key, (const uint8_t *)cmd->text, len,
-                    msg.blob, sizeof(msg.blob), &msg.blob_len) != 0) {
+    if (sc_e2e_seal(&c->box, peer->key, c->e2e_tx_counter + 1,
+                    (const uint8_t *)cmd->text, len, msg.blob,
+                    sizeof(msg.blob), &msg.blob_len) != 0) {
         sc_ui_error(&c->ui, "Could not encrypt the message.");
         return RUN_CONTINUE;
     }
+    c->e2e_tx_counter++;
     run_status rs = send_or_fail(c, &msg);
     if (rs == RUN_CONTINUE) {
         sc_ui_private_out(&c->ui, peer->name, peer->color, cmd->text);

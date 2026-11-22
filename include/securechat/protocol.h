@@ -23,8 +23,15 @@
 #define SC_NAME_MAX 16  /* bytes, ASCII [A-Za-z0-9_-] */
 #define SC_TEXT_MAX 512 /* bytes of UTF-8 per chat message */
 
-/* Size of one sealed end-to-end private message: nonce || box(text). */
-#define SC_E2E_OVERHEAD (crypto_box_NONCEBYTES + crypto_box_MACBYTES)
+/*
+ * One sealed end-to-end private message:
+ *   nonce || box(sender_pk || recipient_pk || counter_be64 || text)
+ * Binding both public keys stops reflection (crypto_box keys are symmetric
+ * between two peers); the per-sender counter stops replay and reordering.
+ */
+#define SC_E2E_HEADER_LEN (2 * crypto_box_PUBLICKEYBYTES + 8)
+#define SC_E2E_OVERHEAD \
+    (crypto_box_NONCEBYTES + crypto_box_MACBYTES + SC_E2E_HEADER_LEN)
 #define SC_E2E_MAX (SC_TEXT_MAX + SC_E2E_OVERHEAD)
 
 /* Largest plaintext application payload and largest frame on the wire. */

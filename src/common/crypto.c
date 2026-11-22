@@ -184,17 +184,44 @@ void sc_box_keypair_generate(sc_box_keypair *kp) {
     crypto_box_keypair(kp->pk, kp->sk);
 }
 
+#define E2E_PK crypto_box_PUBLICKEYBYTES
+#define E2E_INNER_MAX (SC_E2E_HEADER_LEN + SC_TEXT_MAX)
+
+static void store_be64(uint8_t out[8], uint64_t v) {
+    for (int i = 7; i >= 0; i--) {
+        out[i] = (uint8_t)(v & 0xFF);
+        v >>= 8;
+    }
+}
+
+static uint64_t load_be64(const uint8_t in[8]) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) {
+        v = (v << 8) | in[i];
+    }
+    return v;
+}
+
 int sc_e2e_seal(const sc_box_keypair *self,
                 const uint8_t peer_pk[crypto_box_PUBLICKEYBYTES],
-                const uint8_t *msg, size_t len, uint8_t *out, size_t cap,
-                size_t *out_len) {
-    if (len == 0 || len > SC_TEXT_MAX || cap < len + SC_E2E_OVERHEAD) {
+                uint64_t counter, const uint8_t *msg, size_t len,
+                uint8_t *out, size_t cap, size_t *out_len) {
+    uint8_t inner[E2E_INNER_MAX];
+    if (counter == 0 || len == 0 || len > SC_TEXT_MAX ||
+        cap < len + SC_E2E_OVERHEAD) {
         return -1;
     }
+    /* Authenticated header: who sent it, to whom, and in which order. */
+    memcpy(inner, self->pk, E2E_PK);
+    memcpy(inner + E2E_PK, peer_pk, E2E_PK);
+    store_be64(inner + 2 * E2E_PK, counter);
+    memcpy(inner + SC_E2E_HEADER_LEN, msg, len);
     /* 24-byte random nonces: collision probability is negligible. */
     randombytes_buf(out, crypto_box_NONCEBYTES);
-    if (crypto_box_easy(out + crypto_box_NONCEBYTES, msg, len, out, peer_pk,
-                        self->sk) != 0) {
+    int rc = crypto_box_easy(out + crypto_box_NONCEBYTES, inner,
+                             SC_E2E_HEADER_LEN + len, out, peer_pk, self->sk);
+    sodium_memzero(inner, sizeof(inner));
+    if (rc != 0) {
         return -1;
     }
     *out_len = len + SC_E2E_OVERHEAD;
@@ -203,19 +230,33 @@ int sc_e2e_seal(const sc_box_keypair *self,
 
 int sc_e2e_open(const sc_box_keypair *self,
                 const uint8_t peer_pk[crypto_box_PUBLICKEYBYTES],
-                const uint8_t *in, size_t len, uint8_t *out, size_t cap,
-                size_t *out_len) {
+                uint64_t *last_counter, const uint8_t *in, size_t len,
+                uint8_t *out, size_t cap, size_t *out_len) {
+    uint8_t inner[E2E_INNER_MAX];
     if (len <= SC_E2E_OVERHEAD || len > SC_E2E_MAX ||
         cap < len - SC_E2E_OVERHEAD) {
         return -1;
     }
-    if (crypto_box_open_easy(out, in + crypto_box_NONCEBYTES,
+    size_t inner_len = len - crypto_box_NONCEBYTES - crypto_box_MACBYTES;
+    if (crypto_box_open_easy(inner, in + crypto_box_NONCEBYTES,
                              len - crypto_box_NONCEBYTES, in, peer_pk,
                              self->sk) != 0) {
         return -1;
     }
-    *out_len = len - SC_E2E_OVERHEAD;
-    return 0;
+    int rc = -1;
+    uint64_t counter = load_be64(inner + 2 * E2E_PK);
+    /* The box key is shared by both peers, so the MAC alone does not say who
+     * sealed it: check the bound direction, then freshness. */
+    if (sodium_memcmp(inner, peer_pk, E2E_PK) == 0 &&
+        sodium_memcmp(inner + E2E_PK, self->pk, E2E_PK) == 0 &&
+        counter > *last_counter) {
+        *out_len = inner_len - SC_E2E_HEADER_LEN;
+        memcpy(out, inner + SC_E2E_HEADER_LEN, *out_len);
+        *last_counter = counter;
+        rc = 0;
+    }
+    sodium_memzero(inner, sizeof(inner));
+    return rc;
 }
 
 void sc_fingerprint(const uint8_t *key, size_t key_len,

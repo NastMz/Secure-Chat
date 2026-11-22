@@ -13,6 +13,18 @@
 #include "securechat/message.h"
 #include "ui.h"
 
+/*
+ * Highest private-message counter accepted from each peer key seen in this
+ * session. Entries are kept after the peer leaves so that a hostile server
+ * cannot replay an old message by announcing the same key again.
+ */
+#define SC_E2E_PEERS_MAX 256
+
+typedef struct {
+    uint8_t key[crypto_box_PUBLICKEYBYTES];
+    uint64_t last_counter;
+} sc_e2e_peer;
+
 typedef struct {
     int fd;
     sc_channel ch;
@@ -25,6 +37,9 @@ typedef struct {
     uint8_t color;
     sc_peer roster[SC_MAX_CLIENTS];
     size_t roster_len;
+    uint64_t e2e_tx_counter; /* last counter sealed, shared by all peers */
+    sc_e2e_peer e2e_rx[SC_E2E_PEERS_MAX];
+    size_t e2e_rx_len;
     sc_lineedit editor;
     sc_ui ui;
 } sc_client;

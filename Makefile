@@ -5,12 +5,19 @@
 #   make integration   end-to-end test (server + 2 clients + wire capture)
 #   make check         unit + integration
 #   make sanitize      everything again under AddressSanitizer + UBSan
+#                      (GCC 12's ASan can hang on kernels with
+#                      vm.mmap_rnd_bits=32; the Docker test stage uses GCC 14)
 #   make clean
+#
+# Every test binary and the integration test run under `timeout`, so a hang
+# fails fast. Override the limit in seconds with TEST_TIMEOUT=N.
 
 CC       ?= cc
 BUILD    ?= build
 SANITIZE ?= 0
 PYTHON   ?= python3
+TEST_TIMEOUT ?= 300
+RUN_TIMEOUT  := timeout -k 10 $(TEST_TIMEOUT)
 
 SODIUM_CFLAGS := $(shell pkg-config --cflags libsodium)
 SODIUM_LIBS   := $(shell pkg-config --libs libsodium)
@@ -66,10 +73,10 @@ $(BUILD)/obj/%.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 test: $(TEST_BINS)
-	@set -e; for t in $(TEST_BINS); do $$t; done
+	@set -e; for t in $(TEST_BINS); do $(RUN_TIMEOUT) $$t; done
 
 integration: all
-	$(PYTHON) tests/integration_test.py $(BUILD)
+	$(RUN_TIMEOUT) $(PYTHON) tests/integration_test.py $(BUILD)
 
 check: test integration
 

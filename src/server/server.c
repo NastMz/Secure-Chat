@@ -20,6 +20,19 @@
 /* Per-connection output queue; a client that lets it fill up is dropped. */
 #define OUTBUF_SIZE (64 * 1024)
 
+/*
+ * Flow control. Input is processed at most MAX_FRAMES_PER_ROUND frames per
+ * connection per poll round, and output is flushed after every round, so a
+ * burst from one sender cannot pile up in a reader's queue before it gets a
+ * chance to drain. While any queue is above HIGH_WATER, the server stops
+ * reading from joined connections (any of them could target the congested
+ * one) until it drains. A connection whose queue stays above HIGH_WATER for
+ * STALL_SECONDS has stopped reading and is dropped.
+ */
+#define MAX_FRAMES_PER_ROUND 8
+#define HIGH_WATER (OUTBUF_SIZE / 2)
+#define STALL_SECONDS 10
+
 typedef enum {
     CONN_FREE = 0,
     CONN_HELLO,  /* waiting for ClientHello */
@@ -38,6 +51,8 @@ typedef struct {
     sc_frame_reader in;
     uint8_t out[OUTBUF_SIZE];
     size_t out_len;
+    time_t stalled_since; /* 0, or when out_len first exceeded HIGH_WATER */
+    int input_pending;    /* buffered input left unprocessed last round */
     sc_server_handshake hs;
     sc_channel ch;
     char name[SC_NAME_MAX + 1];
@@ -341,9 +356,48 @@ static void handle_frame(server *s, conn *c, const uint8_t *frame,
     }
 }
 
-static void on_readable(server *s, conn *c) {
+/* 1 when some live connection's output queue is above the high-water mark. */
+static int room_congested(const server *s) {
+    for (size_t i = 0; i < SC_MAX_CLIENTS; i++) {
+        const conn *c = &s->conns[i];
+        if (is_live(c) && c->out_len > HIGH_WATER) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Only encrypted connections can make the server queue data for others. */
+static int input_paused(const server *s, const conn *c) {
+    return (c->state == CONN_JOIN || c->state == CONN_ACTIVE) &&
+           room_congested(s);
+}
+
+/*
+ * Process up to MAX_FRAMES_PER_ROUND frames, reading from the socket as
+ * needed. Sets input_pending when it stops early with input possibly left.
+ */
+static void service_input(server *s, conn *c) {
     uint8_t frame[SC_FRAME_MAX];
-    for (;;) {
+    int budget = MAX_FRAMES_PER_ROUND;
+    c->input_pending = 0;
+    while (is_live(c)) {
+        if (budget == 0 || input_paused(s, c)) {
+            c->input_pending = 1;
+            return;
+        }
+        size_t frame_len = 0;
+        sc_frame_status st =
+            sc_frame_reader_next(&c->in, frame, sizeof(frame), &frame_len);
+        if (st == SC_FRAME_READY) {
+            handle_frame(s, c, frame, frame_len);
+            budget--;
+            continue;
+        }
+        if (st == SC_FRAME_INVALID) {
+            schedule_close(c, "invalid frame length");
+            return;
+        }
         size_t avail = 0;
         uint8_t *space = sc_frame_reader_space(&c->in, &avail);
         if (avail == 0) {
@@ -365,19 +419,27 @@ static void on_readable(server *s, conn *c) {
             return;
         }
         sc_frame_reader_commit(&c->in, (size_t)n);
+    }
+}
 
-        size_t frame_len = 0;
-        sc_frame_status st;
-        while ((st = sc_frame_reader_next(&c->in, frame, sizeof(frame),
-                                          &frame_len)) == SC_FRAME_READY) {
-            handle_frame(s, c, frame, frame_len);
-            if (!is_live(c)) {
-                return;
-            }
+/* Flush every queue and drop connections that stopped reading. */
+static void flush_all(server *s) {
+    time_t now = time(NULL);
+    for (size_t i = 0; i < SC_MAX_CLIENTS; i++) {
+        conn *c = &s->conns[i];
+        if (!is_live(c)) {
+            continue;
         }
-        if (st == SC_FRAME_INVALID) {
-            schedule_close(c, "invalid frame length");
-            return;
+        if (c->out_len > 0 && flush_output(c) != 0) {
+            schedule_close(c, "connection lost");
+            continue;
+        }
+        if (c->out_len <= HIGH_WATER) {
+            c->stalled_since = 0;
+        } else if (c->stalled_since == 0) {
+            c->stalled_since = now;
+        } else if (now - c->stalled_since >= STALL_SECONDS) {
+            schedule_close(c, "too slow to receive (stopped reading)");
         }
     }
 }
@@ -504,6 +566,7 @@ int sc_server_run(const sc_server_config *cfg, volatile sig_atomic_t *stop) {
 
     while (!*stop) {
         nfds_t nfds = 0;
+        int timeout_ms = 1000;
         fds[nfds].fd = cfg->listen_fd;
         fds[nfds].events = POLLIN;
         owners[nfds++] = NULL;
@@ -512,12 +575,21 @@ int sc_server_run(const sc_server_config *cfg, volatile sig_atomic_t *stop) {
             if (c->state == CONN_FREE) {
                 continue;
             }
+            int paused = input_paused(s, c);
+            short events = (short)((paused ? 0 : POLLIN) |
+                                   (c->out_len > 0 ? POLLOUT : 0));
+            if (events == 0) {
+                continue; /* paused and idle: nothing to wait for */
+            }
+            if (!paused && c->input_pending) {
+                timeout_ms = 0; /* complete frames may already be buffered */
+            }
             fds[nfds].fd = c->fd;
-            fds[nfds].events = (short)(POLLIN | (c->out_len > 0 ? POLLOUT : 0));
+            fds[nfds].events = events;
             owners[nfds++] = c;
         }
 
-        int ready = poll(fds, nfds, 1000);
+        int ready = poll(fds, nfds, timeout_ms);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -531,21 +603,16 @@ int sc_server_run(const sc_server_config *cfg, volatile sig_atomic_t *stop) {
                 schedule_close(c, "connection error");
                 continue;
             }
-            if (fds[i].revents & (POLLIN | POLLHUP)) {
-                on_readable(s, c);
+            if (!input_paused(s, c) &&
+                ((fds[i].revents & (POLLIN | POLLHUP)) || c->input_pending)) {
+                service_input(s, c);
             }
         }
         if (fds[0].revents & POLLIN) {
             accept_clients(s);
         }
         expire_pending(s);
-        for (size_t i = 0; i < SC_MAX_CLIENTS; i++) {
-            conn *c = &s->conns[i];
-            if (c->state != CONN_FREE && c->out_len > 0 && is_live(c) &&
-                flush_output(c) != 0) {
-                schedule_close(c, "connection lost");
-            }
-        }
+        flush_all(s);
         reap(s);
     }
 

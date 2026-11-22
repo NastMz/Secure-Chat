@@ -33,6 +33,7 @@ COMMON_SRC := $(wildcard src/common/*.c)
 SERVER_SRC := $(wildcard src/server/*.c)
 CLIENT_SRC := $(wildcard src/client/*.c)
 CLIENT_LIB := $(filter-out src/client/main.c,$(CLIENT_SRC))
+SERVER_LIB := $(filter-out src/server/main.c,$(SERVER_SRC))
 TEST_SRC   := $(wildcard tests/test_*.c)
 
 obj = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
@@ -54,8 +55,9 @@ $(CLIENT_BIN): $(call obj,$(COMMON_SRC) $(CLIENT_SRC))
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-# Unit tests link the I/O-free modules of the common library and the client.
-$(BUILD)/tests/%: $(call obj,tests/%.c $(COMMON_SRC) $(CLIENT_LIB))
+# Unit tests link the common library and the client and server modules
+# (everything except the two main() files).
+$(BUILD)/tests/%: $(call obj,tests/%.c $(COMMON_SRC) $(CLIENT_LIB) $(SERVER_LIB))
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
